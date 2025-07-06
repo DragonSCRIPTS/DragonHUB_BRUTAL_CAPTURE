@@ -1,0 +1,778 @@
+local BrutalCapture = {}
+
+-- ============================================================================
+-- CONFIGURAÇÃO CRÍTICA
+-- ============================================================================
+
+local BRUTAL_CONFIG = {
+    -- Performance
+    maxFrameTime = 2, -- Máximo 2ms por frame
+    jitterInterval = {min = 0.5, max = 3.0}, -- Intervalo aleatório de scan
+    parallelThreads = 4, -- Threads de deobfuscação paralela
+    
+    -- Instrumentação
+    hookDepth = 5, -- Profundidade de hooks aninhados
+    bytecodeCapture = true, -- Captura bytecode raw
+    memoryPatching = true, -- Patch direto na memória
+    
+    -- Evasão
+    antidetectCycle = 30, -- Ciclo de evasão (segundos)
+    patternRandomization = true, -- Randomiza padrões de acesso
+    ghostMode = false, -- Modo fantasma (ultra-stealth)
+    
+    -- Buffer
+    circularBufferSize = 1000, -- Buffer circular para scripts
+    compressionLevel = 2, -- Nível de compressão
+    batchSaveSize = 50, -- Salva em lotes
+}
+
+-- ============================================================================
+-- SISTEMA DE HOOKS NATIVOS
+-- ============================================================================
+
+local NativeHooks = {}
+local originalFunctions = {}
+local hookStates = {}
+
+-- Funções críticas para hook
+local CRITICAL_FUNCTIONS = {
+    "loadstring", "require", "pcall", "xpcall", "spawn", "coroutine.create",
+    "coroutine.resume", "debug.getfenv", "debug.setfenv", "getrawmetatable",
+    "setrawmetatable", "newcclosure", "islclosure", "getgenv", "getrenv"
+}
+
+-- Hook Manager com C-Closure
+local function createBrutalHook(functionName, originalFunc)
+    local hookId = #NativeHooks + 1
+    local callCount = 0
+    local lastCall = 0
+    
+    -- Cria C-Closure para bypass de detecção
+    local hookedFunction = newcclosure(function(...)
+        callCount = callCount + 1
+        lastCall = tick()
+        
+        -- Captura argumentos
+        local args = {...}
+        local argData = {}
+        
+        for i, arg in ipairs(args) do
+            argData[i] = {
+                type = type(arg),
+                value = type(arg) == "string" and arg or tostring(arg),
+                size = type(arg) == "string" and #arg or 0
+            }
+        end
+        
+        -- Log da chamada
+        BrutalCapture:LogInterception({
+            function_name = functionName,
+            hook_id = hookId,
+            call_count = callCount,
+            timestamp = lastCall,
+            args = argData,
+            stack_trace = debug.traceback()
+        })
+        
+        -- Executa função original
+        local results = {pcall(originalFunc, ...)}
+        local success = results[1]
+        table.remove(results, 1)
+        
+        -- Captura resultado
+        if success and #results > 0 then
+            for i, result in ipairs(results) do
+                if type(result) == "string" then
+                    -- Envia para deobfuscação brutal
+                    spawn(function()
+                        BrutalCapture:BrutalDeobfuscate(result, {
+                            source_function = functionName,
+                            hook_id = hookId,
+                            call_context = args
+                        })
+                    end)
+                end
+            end
+        end
+        
+        return unpack(results)
+    end)
+    
+    NativeHooks[hookId] = {
+        name = functionName,
+        original = originalFunc,
+        hooked = hookedFunction,
+        stats = {
+            calls = 0,
+            lastCall = 0,
+            errors = 0
+        }
+    }
+    
+    return hookedFunction
+end
+
+-- Instala hooks brutais
+local function installBrutalHooks()
+    for _, funcName in ipairs(CRITICAL_FUNCTIONS) do
+        local func = getgenv()[funcName]
+        if func and type(func) == "function" then
+            originalFunctions[funcName] = func
+            local hookedFunc = createBrutalHook(funcName, func)
+            getgenv()[funcName] = hookedFunc
+            hookStates[funcName] = true
+        end
+    end
+    
+    -- Hook especial para game:GetObjects
+    if game.GetObjects then
+        originalFunctions["game:GetObjects"] = game.GetObjects
+        game.GetObjects = createBrutalHook("game:GetObjects", game.GetObjects)
+    end
+end
+
+-- ============================================================================
+-- SISTEMA DE BYTECODE INSTRUMENTATION
+-- ============================================================================
+
+local BytecodeInstrumenter = {}
+
+-- Desmonta função para análise
+local function disassembleFunction(func)
+    if not func or type(func) ~= "function" then return nil end
+    
+    local info = debug.getinfo(func, "S")
+    local constants = {}
+    local upvalues = {}
+    
+    -- Extrai constantes
+    local i = 1
+    while true do
+        local name, value = debug.getlocal(func, i)
+        if not name then break end
+        constants[name] = value
+        i = i + 1
+    end
+    
+    -- Extrai upvalues
+    i = 1
+    while true do
+        local name, value = debug.getupvalue(func, i)
+        if not name then break end
+        upvalues[name] = value
+        i = i + 1
+    end
+    
+    return {
+        source = info.source,
+        lineDefined = info.linedefined,
+        lastLineDefined = info.lastlinedefined,
+        constants = constants,
+        upvalues = upvalues,
+        isC = info.what == "C"
+    }
+end
+
+-- Injeta instrumentação em função
+local function instrumentFunction(func, metadata)
+    if not func or type(func) ~= "function" then return func end
+    
+    local originalFunc = func
+    local instrumentedFunc = function(...)
+        local startTime = tick()
+        local args = {...}
+        
+        -- Log entrada
+        BrutalCapture:LogExecution({
+            type = "function_entry",
+            metadata = metadata,
+            args = args,
+            timestamp = startTime
+        })
+        
+        -- Executa função original
+        local results = {pcall(originalFunc, ...)}
+        local success = results[1]
+        table.remove(results, 1)
+        
+        local endTime = tick()
+        
+        -- Log saída
+        BrutalCapture:LogExecution({
+            type = "function_exit",
+            metadata = metadata,
+            results = results,
+            success = success,
+            execution_time = endTime - startTime,
+            timestamp = endTime
+        })
+        
+        return unpack(results)
+    end
+    
+    return instrumentedFunc
+end
+
+-- ============================================================================
+-- SCANNER ADAPTATIVO COM JITTER
+-- ============================================================================
+
+local AdaptiveScanner = {}
+local scanStats = {
+    lastScan = 0,
+    scanCount = 0,
+    averageTime = 0,
+    currentFPS = 60
+}
+
+-- Calcula FPS atual
+local function calculateFPS()
+    local frameStart = tick()
+    local frameCount = 0
+    
+    spawn(function()
+        while frameCount < 30 do
+            game:GetService("RunService").Heartbeat:Wait()
+            frameCount = frameCount + 1
+        end
+        
+        local frameEnd = tick()
+        scanStats.currentFPS = frameCount / (frameEnd - frameStart)
+    end)
+end
+
+-- Scanner com jitter inteligente
+local function adaptiveScan()
+    local currentTime = tick()
+    
+    -- Verifica se deve pular scan por performance
+    if scanStats.currentFPS < 30 then
+        return -- FPS muito baixo, pula scan
+    end
+    
+    -- Calcula próximo intervalo com jitter
+    local baseInterval = scanStats.currentFPS > 60 and 0.5 or 1.0
+    local jitter = math.random() * (BRUTAL_CONFIG.jitterInterval.max - BRUTAL_CONFIG.jitterInterval.min) + BRUTAL_CONFIG.jitterInterval.min
+    local interval = baseInterval + jitter
+    
+    if currentTime - scanStats.lastScan < interval then
+        return
+    end
+    
+    local scanStart = tick()
+    
+    -- Seleciona containers aleatoriamente
+    local containers = {
+        game.Workspace,
+        game.ReplicatedStorage,
+        game.Players.LocalPlayer,
+        game.StarterPlayer,
+        game.ServerStorage and game.ServerStorage or nil
+    }
+    
+    -- Remove containers nulos
+    for i = #containers, 1, -1 do
+        if not containers[i] then
+            table.remove(containers, i)
+        end
+    end
+    
+    -- Escaneia container aleatório
+    local randomContainer = containers[math.random(#containers)]
+    if randomContainer then
+        BrutalCapture:DeepScanContainer(randomContainer)
+    end
+    
+    -- Atualiza estatísticas
+    local scanEnd = tick()
+    scanStats.lastScan = currentTime
+    scanStats.scanCount = scanStats.scanCount + 1
+    scanStats.averageTime = (scanStats.averageTime + (scanEnd - scanStart)) / 2
+end
+
+-- ============================================================================
+-- PIPELINE DE DEOBFUSCAÇÃO PARALELA
+-- ============================================================================
+
+local DeobfuscationPipeline = {}
+local deobfuscationQueue = {}
+local processingThreads = {}
+
+-- Padrões de obfuscação brutais
+local BRUTAL_PATTERNS = {
+    -- XOR Obfuscation
+    xor_pattern = {
+        pattern = "string%.char%(([%d%s,]+)%)",
+        decoder = function(match)
+            local numbers = {}
+            for num in match:gmatch("%d+") do
+                table.insert(numbers, tonumber(num))
+            end
+            
+            local result = {}
+            for i, num in ipairs(numbers) do
+                -- Tenta diferentes chaves XOR
+                for key = 1, 255 do
+                    local char = string.char(bit32.bxor(num, key))
+                    if char:match("[%w%s%p]") then
+                        result[i] = char
+                        break
+                    end
+                end
+            end
+            return table.concat(result)
+        end
+    },
+    
+    -- ROT13/Caesar Cipher
+    rot_pattern = {
+        pattern = "([A-Za-z]+)",
+        decoder = function(match)
+            local result = {}
+            for i = 1, #match do
+                local char = match:sub(i, i)
+                local code = char:byte()
+                
+                -- Tenta diferentes rotações
+                for rot = 1, 25 do
+                    local newCode = code + rot
+                    if char:match("[A-Z]") then
+                        newCode = ((newCode - 65) % 26) + 65
+                    elseif char:match("[a-z]") then
+                        newCode = ((newCode - 97) % 26) + 97
+                    end
+                    
+                    local newChar = string.char(newCode)
+                    if newChar:match("[%w]") then
+                        result[i] = newChar
+                        break
+                    end
+                end
+            end
+            return table.concat(result)
+        end
+    },
+    
+    -- Base64
+    base64_pattern = {
+        pattern = "([A-Za-z0-9+/=]+)",
+        decoder = function(match)
+            -- Implementação simples de Base64
+            local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            local result = {}
+            
+            for i = 1, #match, 4 do
+                local chunk = match:sub(i, i+3)
+                if #chunk == 4 then
+                    local values = {}
+                    for j = 1, 4 do
+                        local char = chunk:sub(j, j)
+                        values[j] = b64chars:find(char, 1, true) - 1
+                    end
+                    
+                    local byte1 = bit32.bor(bit32.lshift(values[1], 2), bit32.rshift(values[2], 4))
+                    local byte2 = bit32.bor(bit32.lshift(bit32.band(values[2], 15), 4), bit32.rshift(values[3], 2))
+                    local byte3 = bit32.bor(bit32.lshift(bit32.band(values[3], 3), 6), values[4])
+                    
+                    table.insert(result, string.char(byte1))
+                    if chunk:sub(3, 3) ~= "=" then
+                        table.insert(result, string.char(byte2))
+                    end
+                    if chunk:sub(4, 4) ~= "=" then
+                        table.insert(result, string.char(byte3))
+                    end
+                end
+            end
+            
+            return table.concat(result)
+        end
+    },
+    
+    -- Aritmética Modular
+    modular_pattern = {
+        pattern = "local%s+([%w_]+)%s*=%s*(%d+)%s*%%%s*(%d+)",
+        decoder = function(varName, value, modulus)
+            local val = tonumber(value)
+            local mod = tonumber(modulus)
+            return tostring(val % mod)
+        end
+    }
+}
+
+-- Thread de deobfuscação
+local function createDeobfuscationThread(threadId)
+    return coroutine.create(function()
+        while true do
+            if #deobfuscationQueue > 0 then
+                local task = table.remove(deobfuscationQueue, 1)
+                if task then
+                    local startTime = tick()
+                    
+                    -- Aplica todos os padrões de deobfuscação
+                    local deobfuscated = task.code
+                    local changes = {}
+                    
+                    for patternName, patternData in pairs(BRUTAL_PATTERNS) do
+                        local pattern = patternData.pattern
+                        local decoder = patternData.decoder
+                        
+                        deobfuscated = deobfuscated:gsub(pattern, function(...)
+                            local args = {...}
+                            local result = decoder(unpack(args))
+                            
+                            table.insert(changes, {
+                                pattern = patternName,
+                                original = args[1],
+                                deobfuscated = result,
+                                thread_id = threadId
+                            })
+                            
+                            return result
+                        end)
+                    end
+                    
+                    -- Reporta resultado
+                    BrutalCapture:ReportDeobfuscation({
+                        original = task.code,
+                        deobfuscated = deobfuscated,
+                        changes = changes,
+                        metadata = task.metadata,
+                        processing_time = tick() - startTime,
+                        thread_id = threadId
+                    })
+                end
+            end
+            
+            coroutine.yield()
+        end
+    end)
+end
+
+-- Inicializa threads de deobfuscação
+local function initializeDeobfuscationThreads()
+    for i = 1, BRUTAL_CONFIG.parallelThreads do
+        processingThreads[i] = createDeobfuscationThread(i)
+    end
+end
+
+-- ============================================================================
+-- SISTEMA DE EVASÃO
+-- ============================================================================
+
+local EvasionSystem = {}
+local evasionState = {
+    isActive = false,
+    lastCycle = 0,
+    currentPattern = 1,
+    detectionLevel = 0
+}
+
+-- Padrões de evasão
+local EVASION_PATTERNS = {
+    {name = "normal", hookRatio = 1.0, scanIntensity = 1.0},
+    {name = "reduced", hookRatio = 0.7, scanIntensity = 0.5},
+    {name = "minimal", hookRatio = 0.3, scanIntensity = 0.2},
+    {name = "ghost", hookRatio = 0.1, scanIntensity = 0.05}
+}
+
+-- Detecta possível anticheat
+local function detectAnticheat()
+    local suspiciousActivity = 0
+    
+    -- Verifica hooks suspeitos
+    for funcName, _ in pairs(hookStates) do
+        local currentFunc = getgenv()[funcName]
+        if currentFunc and currentFunc ~= NativeHooks[funcName] then
+            suspiciousActivity = suspiciousActivity + 1
+        end
+    end
+    
+    -- Verifica chamadas frequentes de debug
+    local debugCalls = 0
+    for _, hook in pairs(NativeHooks) do
+        if hook.name:find("debug") and hook.stats.calls > 100 then
+            debugCalls = debugCalls + 1
+        end
+    end
+    
+    evasionState.detectionLevel = suspiciousActivity + debugCalls
+    
+    return evasionState.detectionLevel > 5
+end
+
+-- Aplica padrão de evasão
+local function applyEvasionPattern()
+    local currentTime = tick()
+    
+    if currentTime - evasionState.lastCycle < BRUTAL_CONFIG.antidetectCycle then
+        return
+    end
+    
+    -- Detecta anticheat
+    if detectAnticheat() then
+        evasionState.currentPattern = math.min(evasionState.currentPattern + 1, #EVASION_PATTERNS)
+    else
+        evasionState.currentPattern = math.max(evasionState.currentPattern - 1, 1)
+    end
+    
+    local pattern = EVASION_PATTERNS[evasionState.currentPattern]
+    
+    -- Aplica padrão
+    BRUTAL_CONFIG.jitterInterval.min = pattern.scanIntensity * 0.5
+    BRUTAL_CONFIG.jitterInterval.max = pattern.scanIntensity * 3.0
+    
+    -- Desativa alguns hooks baseado no ratio
+    for funcName, hookData in pairs(NativeHooks) do
+        if math.random() > pattern.hookRatio then
+            getgenv()[funcName] = hookData.original
+            hookStates[funcName] = false
+        else
+            getgenv()[funcName] = hookData.hooked
+            hookStates[funcName] = true
+        end
+    end
+    
+    evasionState.lastCycle = currentTime
+end
+
+-- ============================================================================
+-- BUFFER CIRCULAR E PERSISTÊNCIA
+-- ============================================================================
+
+local CircularBuffer = {}
+local buffer = {}
+local bufferIndex = 1
+local pendingSaves = {}
+
+-- Adiciona item ao buffer
+local function addToBuffer(item)
+    buffer[bufferIndex] = {
+        timestamp = tick(),
+        data = item,
+        hash = generateHash(tostring(item))
+    }
+    
+    bufferIndex = bufferIndex + 1
+    if bufferIndex > BRUTAL_CONFIG.circularBufferSize then
+        bufferIndex = 1
+    end
+    
+    -- Adiciona à lista de salvamento
+    table.insert(pendingSaves, buffer[bufferIndex])
+    
+    -- Salva em lote
+    if #pendingSaves >= BRUTAL_CONFIG.batchSaveSize then
+        saveBatch()
+    end
+end
+
+-- Salva lote em disco
+local function saveBatch()
+    if #pendingSaves == 0 then return end
+    
+    local batch = {
+        timestamp = os.time(),
+        count = #pendingSaves,
+        data = {}
+    }
+    
+    for i, item in ipairs(pendingSaves) do
+        table.insert(batch.data, {
+            hash = item.hash,
+            timestamp = item.timestamp,
+            type = type(item.data),
+            size = tostring(item.data) and #tostring(item.data) or 0
+        })
+    end
+    
+    -- Salva metadados
+    local filename = "brutal_batch_" .. os.time() .. ".json"
+    local success = pcall(function()
+        writefile(filename, game:GetService("HttpService"):JSONEncode(batch))
+    end)
+    
+    if success then
+        pendingSaves = {}
+    end
+end
+
+-- ============================================================================
+-- INTERFACE PRINCIPAL
+-- ============================================================================
+
+-- Inicia captura brutal
+function BrutalCapture:StartBrutalCapture(options)
+    options = options or {}
+    
+    -- Atualiza configurações
+    for key, value in pairs(options) do
+        if BRUTAL_CONFIG[key] then
+            BRUTAL_CONFIG[key] = value
+        end
+    end
+    
+    print("🔥 INICIANDO CAPTURA BRUTAL")
+    print("⚠️  MODO EXTREMO ATIVADO")
+    
+    -- Inicializa sistemas
+    installBrutalHooks()
+    initializeDeobfuscationThreads()
+    calculateFPS()
+    
+    -- Loop principal
+    spawn(function()
+        while true do
+            -- Scanner adaptativo
+            adaptiveScan()
+            
+            -- Sistema de evasão
+            applyEvasionPattern()
+            
+            -- Processa threads de deobfuscação
+            for i, thread in pairs(processingThreads) do
+                if thread and coroutine.status(thread) == "suspended" then
+                    coroutine.resume(thread)
+                end
+            end
+            
+            -- Salva buffer se necessário
+            if #pendingSaves > 0 then
+                saveBatch()
+            end
+            
+            wait(0.1)
+        end
+    end)
+    
+    return true
+end
+
+-- Desobfuscação brutal
+function BrutalCapture:BrutalDeobfuscate(code, metadata)
+    table.insert(deobfuscationQueue, {
+        code = code,
+        metadata = metadata,
+        timestamp = tick()
+    })
+end
+
+-- Scan profundo de container
+function BrutalCapture:DeepScanContainer(container)
+    if not container then return end
+    
+    local scanned = {}
+    
+    local function scanRecursive(obj)
+        if scanned[obj] then return end
+        scanned[obj] = true
+        
+        -- Captura tudo
+        if obj:IsA("LuaSourceContainer") then
+            local success, source = pcall(function()
+                return obj.Source
+            end)
+            
+            if success and source then
+                self:BrutalDeobfuscate(source, {
+                    object = obj,
+                    type = "script",
+                    path = obj:GetFullName()
+                })
+            end
+        end
+        
+        -- Verifica propriedades protegidas
+        for _, property in pairs({"Source", "Value", "Text", "Script"}) do
+            local success, value = pcall(function()
+                return obj[property]
+            end)
+            
+            if success and type(value) == "string" then
+                self:BrutalDeobfuscate(value, {
+                    object = obj,
+                    property = property,
+                    type = "property"
+                })
+            end
+        end
+        
+        -- Escaneia filhos
+        for _, child in pairs(obj:GetChildren()) do
+            scanRecursive(child)
+        end
+    end
+    
+    scanRecursive(container)
+end
+
+-- Logs de interceptação
+function BrutalCapture:LogInterception(data)
+    addToBuffer({
+        type = "interception",
+        data = data
+    })
+end
+
+-- Logs de execução
+function BrutalCapture:LogExecution(data)
+    addToBuffer({
+        type = "execution",
+        data = data
+    })
+end
+
+-- Reporta deobfuscação
+function BrutalCapture:ReportDeobfuscation(result)
+    addToBuffer({
+        type = "deobfuscation",
+        data = result
+    })
+    
+    print("🔓 Deobfuscação concluída:", #result.changes, "mudanças")
+end
+
+-- Para captura brutal
+function BrutalCapture:StopBrutalCapture()
+    -- Restaura funções originais
+    for funcName, originalFunc in pairs(originalFunctions) do
+        getgenv()[funcName] = originalFunc
+    end
+    
+    -- Salva buffer final
+    saveBatch()
+    
+    print("🛑 CAPTURA BRUTAL FINALIZADA")
+    
+    return {
+        hooks_restored = #originalFunctions,
+        final_buffer_size = #buffer,
+        total_deobfuscations = #deobfuscationQueue
+    }
+end
+
+-- Obtém estatísticas
+function BrutalCapture:GetBrutalStats()
+    return {
+        hooks_active = #NativeHooks,
+        buffer_size = #buffer,
+        deobfuscation_queue = #deobfuscationQueue,
+        current_fps = scanStats.currentFPS,
+        evasion_level = evasionState.currentPattern,
+        detection_level = evasionState.detectionLevel
+    }
+end
+
+-- Função de utilidade para hash
+function generateHash(content)
+    local hash = 0
+    for i = 1, #content do
+        hash = hash + string.byte(content, i) * i
+    end
+    return tostring(hash)
+end
+
+print("💀 MÓDULO BRUTAL CARREGADO")
+print("🔥 PRONTO PARA DESTRUIR QUALQUER PROTEÇÃO")
+print("⚡ Use BrutalCapture:StartBrutalCapture() para iniciar")
+
+return BrutalCapture
